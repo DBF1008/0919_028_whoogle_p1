@@ -3,6 +3,7 @@ from app.request import send_tor_signal
 from app.utils.session import generate_key
 from app.utils.bangs import gen_bangs_json, load_all_bangs
 from app.utils.misc import gen_file_hash, read_config_bool
+from app.utils.file_utils import atomic_write, file_lock
 from app.utils.ua_generator import load_ua_pool
 from base64 import b64encode
 from bs4 import MarkupResemblesLocatorWarning
@@ -143,29 +144,38 @@ def get_secret_key():
         else:
             print(f"Warning: WHOOGLE_SECRET_KEY too short ({len(env_key)} chars, need 32+). Using file/generated key instead.", file=sys.stderr)
     
-    # Check file-based key
+    # Check file-based key. All file access is serialized with a per-path
+    # lock, and the key is (re)generated with an atomic write so a crash
+    # mid-write can never leave a partially written key file behind.
     app_key_path = os.path.join(app.config['CONFIG_PATH'], 'whoogle.key')
-    if os.path.exists(app_key_path):
+    with file_lock(app_key_path):
+        if os.path.exists(app_key_path):
+            try:
+                with open(app_key_path, 'r', encoding='utf-8') as f:
+                    key = f.read().strip()
+                    # Validate file key
+                    if len(key) >= 32:
+                        return key
+            except (PermissionError, IOError) as e:
+                print(f"Warning: Could not read key file: {e}", file=sys.stderr)
+
+            # The key file is corrupt (e.g. partially written by a crashed
+            # process). Back it up before regenerating so the recovery is
+            # non-destructive and the new key can be written atomically.
+            print("Warning: Key file is invalid, regenerating", file=sys.stderr)
+            try:
+                os.replace(app_key_path, app_key_path + '.corrupt')
+            except OSError:
+                pass
+
+        # Generate new key
+        new_key = str(b64encode(os.urandom(32)))
         try:
-            with open(app_key_path, 'r', encoding='utf-8') as f:
-                key = f.read().strip()
-                # Validate file key
-                if len(key) >= 32:
-                    return key
-                else:
-                    print(f"Warning: Key file too short, regenerating", file=sys.stderr)
+            atomic_write(app_key_path, new_key)
         except (PermissionError, IOError) as e:
-            print(f"Warning: Could not read key file: {e}", file=sys.stderr)
-    
-    # Generate new key
-    new_key = str(b64encode(os.urandom(32)))
-    try:
-        with open(app_key_path, 'w', encoding='utf-8') as key_file:
-            key_file.write(new_key)
-    except (PermissionError, IOError) as e:
-        print(f"Warning: Could not save key file: {e}. Key will not persist across restarts.", file=sys.stderr)
-    
-    return new_key
+            print(f"Warning: Could not save key file: {e}. Key will not persist across restarts.", file=sys.stderr)
+
+        return new_key
 
 app.config['SECRET_KEY'] = get_secret_key()
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=365)

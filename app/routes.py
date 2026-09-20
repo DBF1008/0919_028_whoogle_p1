@@ -29,6 +29,7 @@ from app.utils.results import bold_search_terms,\
     add_currency_card, check_currency, get_tabs_content
 from app.utils.search import Search, needs_https, has_captcha
 from app.utils.session import valid_user_session
+from app.utils.file_utils import file_lock, safe_read_json
 from bs4 import BeautifulSoup as bsoup
 from flask import jsonify, make_response, request, redirect, render_template, \
     send_file, session, url_for, g
@@ -101,24 +102,30 @@ def session_required(f):
                 # Ignore files that are larger than the max session file size
                 if os.path.getsize(file_path) > app.config['MAX_SESSION_SIZE']:
                     continue
+            except OSError:
+                # The file was removed by a concurrent request between
+                # listdir and getsize; nothing to clean up
+                continue
 
-                with open(file_path, 'r', encoding='utf-8') as session_file:
-                    data = json.load(session_file)
-                    if isinstance(data, dict) and 'valid' in data:
-                        continue
-                    invalid_sessions.append(file_path)
-            except Exception:
-                # Broad exception handling here due to how instances installed
-                # with pip seem to have issues storing unrelated files in the
-                # same directory as sessions
-                pass
+            # Read under a per-file lock so we never parse a session file
+            # while another request is writing or removing it. Files with
+            # unreadable/partially written JSON are skipped (they may be
+            # mid-write) and retried on the next request.
+            data = safe_read_json(file_path)
+            if data is None:
+                continue
+            if isinstance(data, dict) and 'valid' in data:
+                continue
+            invalid_sessions.append(file_path)
 
         for invalid_session in invalid_sessions:
-            try:
-                os.remove(invalid_session)
-            except FileNotFoundError:
-                # Don't throw error if the invalid session has been removed
-                pass
+            with file_lock(invalid_session):
+                try:
+                    os.remove(invalid_session)
+                except OSError:
+                    # Don't throw error if the invalid session has already
+                    # been removed by a concurrent request
+                    pass
 
         return f(*args, **kwargs)
 
