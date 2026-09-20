@@ -1,10 +1,10 @@
 from app.filter import clean_query
 from app.request import send_tor_signal
+from app.utils.secret_key import load_or_create_secret_key
 from app.utils.session import generate_key
 from app.utils.bangs import gen_bangs_json, load_all_bangs
 from app.utils.misc import gen_file_hash, read_config_bool
 from app.utils.ua_generator import load_ua_pool
-from base64 import b64encode
 from bs4 import MarkupResemblesLocatorWarning
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -134,38 +134,10 @@ def get_secret_key():
     Returns:
         str: Valid secret key for Flask sessions
     """
-    # Check environment variable first
-    env_key = os.getenv('WHOOGLE_SECRET_KEY', '').strip()
-    if env_key:
-        # Validate env key has minimum length
-        if len(env_key) >= 32:
-            return env_key
-        else:
-            print(f"Warning: WHOOGLE_SECRET_KEY too short ({len(env_key)} chars, need 32+). Using file/generated key instead.", file=sys.stderr)
-    
-    # Check file-based key
-    app_key_path = os.path.join(app.config['CONFIG_PATH'], 'whoogle.key')
-    if os.path.exists(app_key_path):
-        try:
-            with open(app_key_path, 'r', encoding='utf-8') as f:
-                key = f.read().strip()
-                # Validate file key
-                if len(key) >= 32:
-                    return key
-                else:
-                    print(f"Warning: Key file too short, regenerating", file=sys.stderr)
-        except (PermissionError, IOError) as e:
-            print(f"Warning: Could not read key file: {e}", file=sys.stderr)
-    
-    # Generate new key
-    new_key = str(b64encode(os.urandom(32)))
-    try:
-        with open(app_key_path, 'w', encoding='utf-8') as key_file:
-            key_file.write(new_key)
-    except (PermissionError, IOError) as e:
-        print(f"Warning: Could not save key file: {e}. Key will not persist across restarts.", file=sys.stderr)
-    
-    return new_key
+    key, warnings = load_or_create_secret_key(app.config['CONFIG_PATH'])
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
+    return key
 
 app.config['SECRET_KEY'] = get_secret_key()
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=365)

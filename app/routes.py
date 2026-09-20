@@ -22,6 +22,7 @@ from app.utils.bangs import suggest_bang, resolve_bang
 from app.utils.misc import empty_gif, placeholder_img, get_proxy_host_url, \
     fetch_favicon
 from app.filter import Filter
+from app.utils.fileio import cleanup_sessions
 from app.utils.misc import read_config_bool, get_client_ip, get_request_url, \
     check_for_update, encrypt_string
 from app.utils.widgets import *
@@ -90,35 +91,18 @@ def session_required(f):
         # a session based key is always used.
         g.session_key = app.enc_key
 
-        # Clear out old sessions
-        invalid_sessions = []
-        for user_session in os.listdir(app.config['SESSION_FILE_DIR']):
-            file_path = os.path.join(
+        # Clear out old sessions. The scan and delete run while holding a
+        # cross-process lock so concurrent requests cannot observe a
+        # half-written session file or delete a file another request is
+        # actively reading.
+        try:
+            cleanup_sessions(
                 app.config['SESSION_FILE_DIR'],
-                user_session)
-
-            try:
-                # Ignore files that are larger than the max session file size
-                if os.path.getsize(file_path) > app.config['MAX_SESSION_SIZE']:
-                    continue
-
-                with open(file_path, 'r', encoding='utf-8') as session_file:
-                    data = json.load(session_file)
-                    if isinstance(data, dict) and 'valid' in data:
-                        continue
-                    invalid_sessions.append(file_path)
-            except Exception:
-                # Broad exception handling here due to how instances installed
-                # with pip seem to have issues storing unrelated files in the
-                # same directory as sessions
-                pass
-
-        for invalid_session in invalid_sessions:
-            try:
-                os.remove(invalid_session)
-            except FileNotFoundError:
-                # Don't throw error if the invalid session has been removed
-                pass
+                app.config['MAX_SESSION_SIZE'])
+        except OSError:
+            # Never block a request because session cleanup failed; the
+            # next request will retry it.
+            app.logger.exception('Session cleanup failed')
 
         return f(*args, **kwargs)
 
